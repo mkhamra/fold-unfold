@@ -27,3 +27,4 @@ No timers. No score pressure. Just deliberate moves and spatial reasoning.
 ## About
 This project was built as a focused experiment in clarity, restraint, and spatial logic.
 
+https://magratheya.itch.io/foldunfold
