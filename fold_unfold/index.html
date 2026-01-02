@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>FOLD / UNFOLD — Demo v1.2 (Tilt + Snap Rotate)</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0d10;color:#e9eef5;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial;overflow:hidden}
+  body{outline:none}
+  canvas{display:block}
+  .hud{position:fixed;left:14px;top:12px;max-width:920px;z-index:10;
+    background:rgba(0,0,0,.55);backdrop-filter: blur(8px);
+    border:1px solid rgba(255,255,255,.16);border-radius:12px;
+    padding:10px 12px;line-height:1.35}
+  .hud b{letter-spacing:.02em}
+  .hud .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:13px;opacity:.95}
+  .kbd{padding:2px 7px;border:1px solid rgba(255,255,255,.24);border-bottom-color:rgba(255,255,255,.36);
+       border-radius:8px;background:rgba(255,255,255,.08);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+  .muted{opacity:.75}
+  .warn{color:#ffd17a}
+  .ok{color:#9fffd1}
+
+  .touchpad{
+    position:fixed;right:14px;bottom:14px;z-index:10;
+    display:grid;grid-template-columns:repeat(3,44px);grid-template-rows:repeat(3,44px);
+    gap:10px;opacity:.95;user-select:none;-webkit-user-select:none;touch-action:manipulation
+  }
+  .btn{
+    width:44px;height:44px;border-radius:14px;
+    border:1px solid rgba(255,255,255,.18);
+    background:rgba(255,255,255,.08);
+    color:#e9eef5;font-weight:700;
+    display:flex;align-items:center;justify-content:center;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+  }
+  .btn:active{transform:translateY(1px);background:rgba(255,255,255,.12)}
+  .btn.small{font-weight:600;font-size:12px}
+  .btn.hide{visibility:hidden}
+
+  .errorBox{
+    position:fixed;left:14px;right:14px;bottom:14px;z-index:20;
+    padding:10px 12px;border-radius:12px;
+    background:rgba(120,0,0,.35);
+    border:1px solid rgba(255,80,80,.45);
+    color:#ffe6e6;font-size:13px;line-height:1.35;
+    display:none;white-space:pre-wrap
+  }
+</style>
+</head>
+<body tabindex="0">
+<div class="hud">
+  <div><b>FOLD / UNFOLD</b> <span class="muted">— demo v1.2</span></div>
+  <div class="row">
+    <span><span class="kbd">W</span>/<span class="kbd">S</span> tilt forward/back</span>
+    <span><span class="kbd">A</span>/<span class="kbd">D</span> tilt left/right</span>
+    <span><span class="kbd">Shift</span>+<span class="kbd">WASD</span> snap-rotate 90°</span>
+    <span><span class="kbd">F</span> fold/unfold</span>
+    <span><span class="kbd">R</span> reset</span>
+  </div>
+  <div class="row muted" id="status">Loading…</div>
+  <div class="row muted" id="diag"></div>
+  <div class="row muted" id="hint">
+    Mechanic: after every tilt/rotate/fold, the token slides <i>one direction</i> until blocked or it falls into a hole/edge. Blue = goal, green = start, red post = blocker.
+  </div>
+</div>
+
+<div class="touchpad" aria-label="Touch controls">
+  <div class="btn hide"></div>
+  <div class="btn" data-act="w">W</div>
+  <div class="btn hide"></div>
+
+  <div class="btn" data-act="a">A</div>
+  <div class="btn" data-act="f">F</div>
+  <div class="btn" data-act="d">D</div>
+
+  <div class="btn small" data-act="r">RST</div>
+  <div class="btn" data-act="s">S</div>
+  <div class="btn hide"></div>
+</div>
+
+<div class="errorBox" id="errorBox"></div>
+
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script>
+(() => {
+  const statusEl = document.getElementById("status");
+  const diagEl   = document.getElementById("diag");
+  const hintEl   = document.getElementById("hint");
+  const errorBox = document.getElementById("errorBox");
+
+  const setStatus = (msg, warn=false)=>{ statusEl.textContent=msg; statusEl.className = warn ? "row warn" : "row muted"; };
+  const setDiag   = (msg, ok=false)=>{ diagEl.textContent=msg; diagEl.className = ok ? "row ok" : "row muted"; };
+  const setHint   = (msg)=>{ hintEl.innerHTML = msg || ""; };
+  const showError = (msg)=>{ errorBox.style.display="block"; errorBox.textContent=msg; };
+  window.addEventListener("error", (e)=> showError("JS error:\n" + (e.message || e.error || "Unknown error")));
+
+  // Focus capture for keyboard
+  const focusTarget = document.body;
+  function claimFocus(){ try{ focusTarget.focus({preventScroll:true}); }catch(_){ try{ focusTarget.focus(); }catch(__){} } }
+  addEventListener("pointerdown", claimFocus, {passive:true});
+  addEventListener("touchstart", claimFocus, {passive:true});
+  setTimeout(claimFocus, 50);
+
+  if(!window.THREE){ setStatus("Three.js failed to load (no THREE).", true); return; }
+  const webglOK = (()=>{ try{ const c=document.createElement("canvas"); return !!(c.getContext("webgl")||c.getContext("experimental-webgl")); }catch(e){ return false; } })();
+  if(!webglOK){ setStatus("WebGL disabled.", true); return; }
+
+  // Scene
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.setClearColor(0x0b0d10, 1);
+  document.body.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b0d10);
+  scene.fog = new THREE.Fog(0x0b0d10, 16, 46);
+
+  const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 140);
+  camera.position.set(8.0, 7.0, 8.0);
+  camera.lookAt(0,0,0);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.33));
+  scene.add(new THREE.HemisphereLight(0xd9ecff, 0x121625, 0.85));
+  const key = new THREE.DirectionalLight(0xffffff, 1.2);
+  key.position.set(8, 12, 6);
+  key.castShadow = true;
+  key.shadow.mapSize.set(2048,2048);
+  key.shadow.camera.left=-14; key.shadow.camera.right=14;
+  key.shadow.camera.top=14; key.shadow.camera.bottom=-14;
+  key.shadow.camera.near=1; key.shadow.camera.far=70;
+  scene.add(key);
+
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(120,120), new THREE.MeshStandardMaterial({color:0x06070a, roughness:1, metalness:0}));
+  ground.rotation.x = -Math.PI/2;
+  ground.position.y = -4.2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // Board + Level
+  const board = new THREE.Group(); scene.add(board);
+
+  const TILE=1.0, GRID=4, gap=0.05, tileH=0.18;
+
+  const LEVEL = {
+    start: {col:0,row:3},
+    goal:  {col:3,row:0},
+    holes: new Set(["1,0","1,1","2,2","0,1","3,2"]),
+    walls: new Set(["2,0"])
+  };
+
+  const matTile  = new THREE.MeshStandardMaterial({color:0x202a3a, roughness:0.88, metalness:0.08});
+  const matEdge  = new THREE.MeshStandardMaterial({color:0x141a25, roughness:0.95, metalness:0.02});
+  const matGoal  = new THREE.MeshStandardMaterial({color:0x202a3a, roughness:0.62, metalness:0.12, emissive:0x2a70ff, emissiveIntensity:0.80});
+  const matStart = new THREE.MeshStandardMaterial({color:0x202a3a, roughness:0.62, metalness:0.10, emissive:0x2aff9a, emissiveIntensity:0.45});
+  const matWall  = new THREE.MeshStandardMaterial({color:0x202a3a, roughness:0.92, metalness:0.06, emissive:0xff4d6d, emissiveIntensity:0.12});
+
+  const tiles = new Map();
+  const tileToPlane = new Map();
+  const gridToLocal=(c,r)=>({ x:(c-(GRID-1)/2)*TILE, z:(r-(GRID-1)/2)*TILE });
+  const keyCR=(c,r)=>`${c},${r}`;
+  const isHole=(c,r)=>LEVEL.holes.has(keyCR(c,r));
+  const isWall=(c,r)=>LEVEL.walls.has(keyCR(c,r));
+  const isGoal=(c,r)=>c===LEVEL.goal.col && r===LEVEL.goal.row;
+  const isStart=(c,r)=>c===LEVEL.start.col && r===LEVEL.start.row;
+
+  const planeLeft=new THREE.Group(); board.add(planeLeft);
+  const hinge=new THREE.Group(); hinge.position.set(0,0,0); board.add(hinge);
+  const planeRight=new THREE.Group(); hinge.add(planeRight);
+
+  const hingeBar=new THREE.Mesh(new THREE.BoxGeometry(0.10,0.14, GRID*TILE+0.45),
+    new THREE.MeshStandardMaterial({color:0x0f141f, roughness:0.75, metalness:0.15}));
+  hingeBar.position.set(0, tileH*0.55, 0);
+  hingeBar.castShadow=true; hingeBar.receiveShadow=true;
+  board.add(hingeBar);
+
+  for(let r=0;r<GRID;r++){
+    for(let c=0;c<GRID;c++){
+      if(isHole(c,r)) continue;
+      const {x,z}=gridToLocal(c,r);
+
+      let mat = matTile.clone();
+      if(isGoal(c,r)) mat = matGoal.clone();
+      if(isStart(c,r)) mat = matStart.clone();
+      if(isWall(c,r))  mat = matWall.clone();
+
+      const tile=new THREE.Mesh(new THREE.BoxGeometry(TILE-gap, tileH, TILE-gap), mat);
+      tile.castShadow=true; tile.receiveShadow=true;
+      tile.position.set(x,0,z);
+
+      const cap=new THREE.Mesh(new THREE.BoxGeometry(TILE-gap*0.2, tileH*0.32, TILE-gap*0.2), matEdge);
+      cap.position.set(0, tileH*0.22, 0);
+      tile.add(cap);
+
+      if(isWall(c,r)){
+        const post=new THREE.Mesh(new THREE.CylinderGeometry(0.14,0.14,0.55,14),
+          new THREE.MeshStandardMaterial({color:0x0f141f, roughness:0.7, metalness:0.12, emissive:0xff4d6d, emissiveIntensity:0.22}));
+        post.position.set(0,0.42,0);
+        post.castShadow=true;
+        tile.add(post);
+      }
+
+      const k=keyCR(c,r);
+      tiles.set(k,tile);
+      if(c<=1){ planeLeft.add(tile); tileToPlane.set(k,"L"); }
+      else { planeRight.add(tile); tileToPlane.set(k,"R"); }
+    }
+  }
+
+  // Token
+  const tokenRadius=0.22;
+  const token=new THREE.Mesh(new THREE.SphereGeometry(tokenRadius, 28, 20),
+    new THREE.MeshStandardMaterial({color:0xffffff, roughness:0.32, metalness:0.10, emissive:0x6bd3ff, emissiveIntensity:1.0}));
+  token.castShadow=true;
+  scene.add(token);
+
+  // State
+  let tokenCell = {col:LEVEL.start.col, row:LEVEL.start.row};
+  let busy=false;
+  let folded=true; // start folded
+  let tiltX = 0;   // radians (board pitch)
+  let tiltZ = 0;   // radians (board roll)
+  const TILT_STEP = 18 * Math.PI/180;     // 18° increments
+  const TILT_MAX  = 90 * Math.PI/180;     // allow full 90° tilt (so it CAN "stand up")
+  const TURN_MS=220;
+
+  const planeForCell=(c)=> (c<=1) ? "L" : "R";
+  const seamBlocked=()=> folded;
+
+  function cellWorldPose(c,r){
+    const tile=tiles.get(keyCR(c,r));
+    if(!tile) return null;
+    const pos=new THREE.Vector3(); tile.getWorldPosition(pos);
+    const n=new THREE.Vector3(0,1,0).applyQuaternion(tile.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    return {pos,n};
+  }
+
+  function placeTokenInstant(){
+    scene.updateMatrixWorld(true);
+    const pose = cellWorldPose(tokenCell.col, tokenCell.row);
+    if(!pose){ token.position.set(0,4,0); return; }
+    token.position.copy(pose.pos).addScaledVector(pose.n, tokenRadius + 0.012 + tileH*0.5);
+  }
+
+  // Start folded (right plane up)
+  hinge.quaternion.identity();
+  hinge.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), Math.PI/2));
+  placeTokenInstant();
+
+  function animate(ms, step){
+    return new Promise(res=>{
+      const t0=performance.now();
+      const loop=(t)=>{
+        const k=Math.min(1,(t-t0)/ms);
+        step(k);
+        if(k<1) requestAnimationFrame(loop);
+        else res();
+      };
+      requestAnimationFrame(loop);
+    });
+  }
+
+  // Carry point around axis
+  function rotatePointAroundAxis(p, axis, angle, origin){
+    const v=p.clone().sub(origin);
+    v.applyAxisAngle(axis, angle);
+    return v.add(origin);
+  }
+
+  // Movement: pick a single downhill direction from gravity-in-board-local.
+  const G = new THREE.Vector3(0,-1,0);
+  function gravityInBoardLocal(){
+    const qInv = board.getWorldQuaternion(new THREE.Quaternion()).invert();
+    return G.clone().applyQuaternion(qInv);
+  }
+
+  function chosenDownhillDir(){
+    const gL = gravityInBoardLocal(); // in board local
+    // If board is nearly vertical, treat as fall.
+    // (This is the "it stands up → token falls" rule.)
+    const boardUp = new THREE.Vector3(0,1,0).applyQuaternion(board.getWorldQuaternion(new THREE.Quaternion()));
+    if(boardUp.y < 0.22) return {fall:true};
+
+    // Choose dominant axis direction
+    if(Math.abs(gL.x) > Math.abs(gL.z)){
+      return gL.x > 0 ? {dc:+1, dr:0} : {dc:-1, dr:0};
+    } else {
+      return gL.z > 0 ? {dc:0, dr:+1} : {dc:0, dr:-1};
+    }
+  }
+
+  async function animateTokenToCell(){
+    scene.updateMatrixWorld(true);
+    const pose = cellWorldPose(tokenCell.col, tokenCell.row);
+    if(!pose) return;
+    const from=token.position.clone();
+    const to=pose.pos.clone().addScaledVector(pose.n, tokenRadius + 0.012 + tileH*0.5);
+    await animate(150, (k)=>{
+      const kk = k*k*(3-2*k);
+      const mid = from.clone().lerp(to, kk);
+      mid.y += 0.10 * Math.sin(Math.PI * kk);
+      token.position.copy(mid);
+    });
+  }
+
+  async function resetToken(msg){
+    setStatus(msg || "Fell → reset.", true);
+    tokenCell = {col:LEVEL.start.col, row:LEVEL.start.row};
+    await animateTokenToCell();
+  }
+
+  async function resolveSlide(){
+    const maxSteps=40;
+
+    const dir = chosenDownhillDir();
+    if(dir && dir.fall){
+      await resetToken("Board is vertical-ish → token falls → reset.");
+      return;
+    }
+
+    for(let i=0;i<maxSteps;i++){
+      const d = chosenDownhillDir();
+
+      const nc = tokenCell.col + d.dc;
+      const nr = tokenCell.row + d.dr;
+
+      // seam rule
+      const crossing = (tokenCell.col===1 && nc===2) || (tokenCell.col===2 && nc===1);
+      if(crossing && seamBlocked()) break;
+
+      // falling off edge / into holes
+      if(nc<0||nc>=GRID||nr<0||nr>=GRID) { await resetToken("Rolled off the board → reset."); return; }
+      if(isHole(nc,nr)) { await resetToken("Fell into a hole → reset."); return; }
+
+      // blockers stop motion
+      if(isWall(nc,nr)) break;
+      if(!tiles.has(keyCR(nc,nr))) break;
+
+      // move
+      tokenCell = {col:nc, row:nr};
+      await animateTokenToCell();
+
+      if(isGoal(tokenCell.col, tokenCell.row)){
+        setStatus("WIN: reached blue goal.", false);
+        return;
+      }
+    }
+
+    setStatus(`Token (${tokenCell.col},${tokenCell.row}) • Folded:${folded?"Y":"N"} • TiltX:${Math.round(tiltX*57.3)}° TiltZ:${Math.round(tiltZ*57.3)}°`, false);
+  }
+
+  function boardQuatFromTilt(){
+    return new THREE.Quaternion().setFromEuler(new THREE.Euler(tiltX, 0, tiltZ, "XYZ"));
+  }
+
+  async function applyBoardQuatAnimated(q1){
+    const q0 = board.quaternion.clone();
+    // carry token with world during rotation
+    const p0 = token.position.clone();
+    // approximate carry by rotating around origin using delta quaternion on position:
+    // (This is visual polish; grid movement is still deterministic afterwards.)
+    const dq = q0.clone().invert().multiply(q1); // delta from current -> next
+    const axis = new THREE.Vector3(1,0,0);
+    let ang = 0;
+    // Extract axis-angle from dq
+    const aa = {axis:new THREE.Vector3(0,1,0), angle:0};
+    const qw = dq.w;
+    aa.angle = 2*Math.acos(Math.max(-1,Math.min(1,qw)));
+    const s = Math.sqrt(Math.max(0,1-qw*qw));
+    if(s < 1e-6) aa.axis.set(1,0,0);
+    else aa.axis.set(dq.x/s, dq.y/s, dq.z/s).normalize();
+
+    const p1 = rotatePointAroundAxis(p0, aa.axis, aa.angle, new THREE.Vector3(0,0,0));
+
+    await animate(TURN_MS, (k)=>{
+      board.quaternion.copy(q0).slerp(q1,k);
+      token.position.lerpVectors(p0,p1,k);
+    });
+  }
+
+  async function doTilt(dx, dz){
+    if(busy) return; busy=true;
+
+    tiltX = Math.max(-TILT_MAX, Math.min(TILT_MAX, tiltX + dx));
+    tiltZ = Math.max(-TILT_MAX, Math.min(TILT_MAX, tiltZ + dz));
+
+    const q1 = boardQuatFromTilt();
+    await applyBoardQuatAnimated(q1);
+    await resolveSlide();
+    busy=false;
+  }
+
+  async function doSnapRotate(axis, angle){
+    // snap rotate 90° by applying delta to board, then re-derive tiltX/tiltZ from quaternion (approx)
+    if(busy) return; busy=true;
+
+    const q0 = board.quaternion.clone();
+    const q1 = q0.clone().multiply(new THREE.Quaternion().setFromAxisAngle(axis, angle));
+
+    await applyBoardQuatAnimated(q1);
+
+    // Re-approximate tiltX/tiltZ for HUD + further tilts:
+    const e = new THREE.Euler().setFromQuaternion(board.quaternion, "XYZ");
+    tiltX = Math.max(-TILT_MAX, Math.min(TILT_MAX, e.x));
+    tiltZ = Math.max(-TILT_MAX, Math.min(TILT_MAX, e.z));
+
+    await resolveSlide();
+    busy=false;
+  }
+
+  async function doFoldToggle(){
+    if(busy) return; busy=true;
+
+    const angle = folded ? -Math.PI/2 : +Math.PI/2;
+    const q0=hinge.quaternion.clone();
+    const q1=q0.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), angle));
+
+    const onRight = planeForCell(tokenCell.col) === "R";
+    scene.updateMatrixWorld(true);
+    const hingeWorldPos=new THREE.Vector3(); hinge.getWorldPosition(hingeWorldPos);
+    const hingeWorldAxis=new THREE.Vector3(0,0,1).applyQuaternion(hinge.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    const p0 = token.position.clone();
+    const p1 = onRight ? rotatePointAroundAxis(p0, hingeWorldAxis, angle, hingeWorldPos) : p0.clone();
+
+    await animate(TURN_MS, (k)=>{
+      hinge.quaternion.copy(q0).slerp(q1,k);
+      token.position.lerpVectors(p0,p1,k);
+    });
+
+    folded = !folded;
+    await resolveSlide();
+    busy=false;
+  }
+
+  function resetAll(){
+    if(busy) return;
+    tiltX=0; tiltZ=0;
+    board.quaternion.identity();
+    hinge.quaternion.identity();
+    hinge.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), Math.PI/2));
+    folded=true;
+    tokenCell = {col:LEVEL.start.col, row:LEVEL.start.row};
+    placeTokenInstant();
+    setStatus("Reset. (Use WASD tilts; Shift+WASD for 90° snaps; F unfolds.)", false);
+  }
+
+  function handleKey(e){
+    const k=(e.key||"").toLowerCase();
+    const sh = !!e.shiftKey;
+    setDiag(`Input: ${sh?"Shift+":"")}${k.toUpperCase()} • Token:(${tokenCell.col},${tokenCell.row}) • Folded:${folded?"Y":"N"}`, true);
+
+    if(k==="r") return resetAll();
+    if(k==="f") return doFoldToggle();
+
+    if(sh){
+      // snap rotate: WASD
+      if(k==="w") return doSnapRotate(new THREE.Vector3(1,0,0), +Math.PI/2);
+      if(k==="s") return doSnapRotate(new THREE.Vector3(1,0,0), -Math.PI/2);
+      if(k==="a") return doSnapRotate(new THREE.Vector3(0,0,1), +Math.PI/2);
+      if(k==="d") return doSnapRotate(new THREE.Vector3(0,0,1), -Math.PI/2);
+      return;
+    }
+
+    if(k==="w") return doTilt(+TILT_STEP, 0);
+    if(k==="s") return doTilt(-TILT_STEP, 0);
+    if(k==="a") return doTilt(0, +TILT_STEP);
+    if(k==="d") return doTilt(0, -TILT_STEP);
+  }
+
+  window.addEventListener("keydown",(e)=>{ if(e.repeat) return; handleKey(e); });
+  document.body.addEventListener("keydown",(e)=>{ if(e.repeat) return; handleKey(e); });
+
+  // Touch: tilts only (snap is keyboard-only)
+  document.querySelectorAll(".btn[data-act]").forEach(btn=>{
+    const act=btn.getAttribute("data-act");
+    btn.addEventListener("pointerdown",(e)=>{
+      e.preventDefault(); claimFocus();
+      if(act==="w") return doTilt(+TILT_STEP,0);
+      if(act==="s") return doTilt(-TILT_STEP,0);
+      if(act==="a") return doTilt(0,+TILT_STEP);
+      if(act==="d") return doTilt(0,-TILT_STEP);
+      if(act==="f") return doFoldToggle();
+      if(act==="r") return resetAll();
+    });
+  });
+
+  addEventListener("resize",()=>{
+    camera.aspect=innerWidth/innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2));
+  });
+
+  function pulseTiles(){
+    const t=performance.now()*0.002;
+    const gk=keyCR(LEVEL.goal.col, LEVEL.goal.row);
+    const sk=keyCR(LEVEL.start.col, LEVEL.start.row);
+    for(const [k,m] of tiles){
+      if(m.material && m.material.emissive){
+        if(k===gk) m.material.emissiveIntensity = 0.76 + 0.22*Math.sin(t);
+        if(k===sk) m.material.emissiveIntensity = 0.40 + 0.08*Math.sin(t*0.9);
+      }
+    }
+  }
+
+  function loop(){
+    requestAnimationFrame(loop);
+    pulseTiles();
+    renderer.render(scene,camera);
+  }
+
+  setStatus("Ready. Press F to unfold, then tilt with WASD. Shift+WASD = 90° snap rotations.", false);
+  setDiag(`Three r${THREE.REVISION} • ${innerWidth}×${innerHeight}`, true);
+  loop();
+})();
+</script>
+</body>
+</html>
